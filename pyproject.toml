@@ -23,7 +23,10 @@ classifiers = [
 ]
 requires-python = ">=3.9"
 dependencies = [
-    "numpy>=2.0.0",
+    "dask>=2024.8.0",
+    "pydantic>=2.12.3",
+    "requests>=2.32.5",
+    "xarray>=2024.7.0",
 ]
 
 [project.optional-dependencies]
@@ -133,4 +136,9 @@ exclude_lines = [
     "if __name__ == .__main__.:",
     "class .*\\bProtocol\\):",
     "@(abc\\.)?abstractmethod",
+]
+
+[dependency-groups]
+dev = [
+    "pytest-cov>=7.0.0",
 ]
