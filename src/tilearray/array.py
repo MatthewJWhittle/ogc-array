@@ -5,7 +5,7 @@ This module provides utilities for creating xarray objects with Dask chunks
 from various geospatial tile services.
 """
 
-from typing import Optional, Callable, Tuple, Union, Dict, Any
+from typing import Optional, Callable, Tuple, Union, Dict, Any, List
 import numpy as np
 import xarray as xr
 import dask.array as da
@@ -13,6 +13,7 @@ from dask.delayed import delayed
 
 from .types import BoundingBox, CRS, Format, TileRequest, TileResponse
 from .tiles import fetch_tile
+from .core import parse_bbox, BBoxTuple, ServiceConfig
 
 
 def create_array(
@@ -43,10 +44,26 @@ def create_array(
     Returns:
         xarray.DataArray with Dask backend
     """
-    from .core import create_tile_grid
+    from .core import create_tile_grid, estimate_tile_size
+    
+    # Convert chunk_size tuple to tile_size float
+    if isinstance(chunk_size, tuple) and len(chunk_size) == 2:
+        # Use the average of width and height as target pixels
+        target_pixels = int((chunk_size[0] + chunk_size[1]) / 2)
+        tile_size = estimate_tile_size(bbox, target_pixels)
+    else:
+        # If chunk_size is already a float, use it directly
+        tile_size = float(chunk_size)
     
     # Create tile grid
-    x_coords, y_coords, grid_shape = create_tile_grid(bbox, chunk_size)
+    tile_bboxes = create_tile_grid(bbox, tile_size)
+    
+    # Extract unique coordinates and calculate grid shape
+    x_coords = sorted(list(set([tile.min_x for tile in tile_bboxes] + [bbox.max_x])))
+    y_coords = sorted(list(set([tile.min_y for tile in tile_bboxes] + [bbox.max_y])))
+    
+    # Calculate grid shape
+    grid_shape = (len(x_coords) - 1, len(y_coords) - 1)
     
     # Create delayed functions for each tile
     delayed_tiles = []
@@ -90,18 +107,51 @@ def create_array(
         else:
             data_array = da.stack(dask_arrays[0], axis=1)
     
-    # Create coordinate arrays
-    x_coords_final = np.linspace(bbox.min_x, bbox.max_x, data_array.shape[1])
-    y_coords_final = np.linspace(bbox.min_y, bbox.max_y, data_array.shape[0])
+    # Create coordinate arrays based on data dimensions
+    data_shape = data_array.shape
+    
+    if len(data_shape) == 1:
+        # 1D data - single dimension
+        coords = {
+            'x': np.linspace(bbox.min_x, bbox.max_x, data_shape[0])
+        }
+        dims = ['x']
+    elif len(data_shape) == 2:
+        # 2D data - spatial dimensions
+        coords = {
+            'y': np.linspace(bbox.min_y, bbox.max_y, data_shape[0]),
+            'x': np.linspace(bbox.min_x, bbox.max_x, data_shape[1])
+        }
+        dims = ['y', 'x']
+    elif len(data_shape) == 3:
+        # 3D data - spatial + additional dimension (e.g., bands, time, etc.)
+        coords = {
+            'y': np.linspace(bbox.min_y, bbox.max_y, data_shape[0]),
+            'x': np.linspace(bbox.min_x, bbox.max_x, data_shape[1]),
+            'band': np.arange(data_shape[2])  # Additional dimension
+        }
+        dims = ['y', 'x', 'band']
+    else:
+        # 4D+ data - handle generically
+        coords = {}
+        dims = []
+        
+        # First two dimensions are spatial
+        coords['y'] = np.linspace(bbox.min_y, bbox.max_y, data_shape[0])
+        coords['x'] = np.linspace(bbox.min_x, bbox.max_x, data_shape[1])
+        dims.extend(['y', 'x'])
+        
+        # Additional dimensions
+        for i in range(2, len(data_shape)):
+            dim_name = f'dim_{i}'
+            coords[dim_name] = np.arange(data_shape[i])
+            dims.append(dim_name)
     
     # Create xarray DataArray
     return xr.DataArray(
         data_array,
-        coords={
-            'y': y_coords_final,
-            'x': x_coords_final
-        },
-        dims=['y', 'x'],
+        coords=coords,
+        dims=dims,
         attrs={
             'crs': (crs or bbox.crs).value,
             'service_url': service_url,
@@ -298,3 +348,290 @@ def _parse_jpeg(data: bytes) -> np.ndarray:
         return np.array([])
     except Exception:
         return np.array([])
+
+# User-friendly service creation functions
+def create_wcs_service(
+    url: str,
+    coverage_id: str,
+    resolution: Optional[Tuple[int, int]] = None,
+    output_format: str = "image/tiff",
+    crs: str = "EPSG:4326",
+    **kwargs
+) -> ServiceConfig:
+    """
+    Create a WCS service configuration.
+    
+    Args:
+        url: WCS service URL
+        coverage_id: Coverage identifier
+        resolution: Optional (width, height) resolution override
+        output_format: Output format (default: GeoTIFF)
+        crs: Coordinate reference system
+        **kwargs: Additional WCS parameters
+        
+    Returns:
+        Service configuration dictionary
+    """
+    from .ogc import WCSTileAdapter
+    return {
+        "type": "WCS",
+        "url": url,
+        "coverage_id": coverage_id,
+        "resolution": resolution,
+        "format": output_format,
+        "crs": crs,
+        "adapter_class": WCSTileAdapter,
+        **kwargs
+    }
+
+
+def create_wms_service(
+    url: str,
+    layers: Union[str, List[str]],
+    resolution: Optional[Tuple[int, int]] = None,
+    output_format: str = "image/tiff",
+    crs: str = "EPSG:4326",
+    **kwargs
+) -> ServiceConfig:
+    """
+    Create a WMS service configuration.
+    
+    Args:
+        url: WMS service URL
+        layers: Layer name(s) to request
+        resolution: Optional (width, height) resolution override
+        output_format: Output format (default: GeoTIFF)
+        crs: Coordinate reference system
+        **kwargs: Additional WMS parameters
+        
+    Returns:
+        Service configuration dictionary
+    """
+    from .ogc import WMSTileAdapter
+    return {
+        "type": "WMS",
+        "url": url,
+        "layers": layers,
+        "resolution": resolution,
+        "format": output_format,
+        "crs": crs,
+        "adapter_class": WMSTileAdapter,
+        **kwargs
+    }
+
+
+def create_wmts_service(
+    url: str,
+    layer: str,
+    tile_matrix_set: str,
+    resolution: Optional[Tuple[int, int]] = None,
+    output_format: str = "image/tiff",
+    **kwargs
+) -> ServiceConfig:
+    """
+    Create a WMTS service configuration.
+    
+    Args:
+        url: WMTS service URL
+        layer: Layer identifier
+        tile_matrix_set: Tile matrix set identifier
+        resolution: Optional (width, height) resolution override
+        output_format: Output format (default: GeoTIFF)
+        **kwargs: Additional WMTS parameters
+        
+    Returns:
+        Service configuration dictionary
+    """
+    from .ogc import WMTSAdapter
+    return {
+        "type": "WMTS",
+        "url": url,
+        "layer": layer,
+        "tile_matrix_set": tile_matrix_set,
+        "resolution": resolution,
+        "format": output_format,
+        "adapter_class": WMTSAdapter,
+        **kwargs
+    }
+
+
+# User-friendly array loading functions
+def load_array(
+    service: ServiceConfig,
+    bbox: Union[BBoxTuple, BoundingBox],
+    chunk_size: Tuple[int, int] = (256, 256),
+    **kwargs
+) -> xr.DataArray:
+    """
+    Load geospatial data as an xarray DataArray.
+    
+    Args:
+        service: Service configuration (from create_wcs_service, etc.)
+        bbox: Bounding box as tuple (min_x, min_y, max_x, max_y) or BoundingBox
+        chunk_size: Dask chunk size (width, height)
+        **kwargs: Additional parameters for the service
+        
+    Returns:
+        xarray.DataArray with Dask backend
+    """
+    # Parse bounding box
+    parsed_bbox = parse_bbox(bbox, service.get("crs", "EPSG:4326"))
+    
+    # Get service parameters
+    service_type = service["type"]
+    service_url = service["url"]
+    
+    # Get coverage/layer identifier based on service type
+    if service_type == "WCS":
+        coverage_id = service["coverage_id"]
+    elif service_type == "WMS":
+        coverage_id = service["layers"]
+    elif service_type == "WMTS":
+        coverage_id = service["layer"]
+    else:
+        raise ValueError(f"Unsupported service type: {service_type}")
+    
+    # Get resolution override
+    resolution = service.get("resolution")
+    if resolution:
+        chunk_size = resolution
+    
+    # Get format
+    try:
+        output_format = Format(service.get("format", "image/tiff"))
+    except ValueError as exc:
+        raise ValueError(f"Unsupported format: {service.get('format')}") from exc
+    
+    # Get CRS
+    try:
+        crs = CRS(service.get("crs", "EPSG:4326"))
+    except ValueError as exc:
+        raise ValueError(f"Unsupported CRS: {service.get('crs')}") from exc
+    
+    # Create array using the generic function
+    return create_array(
+        service_url=service_url,
+        coverage_id=coverage_id,
+        bbox=parsed_bbox,
+        service_type=service_type,
+        chunk_size=chunk_size,
+        output_format=output_format,
+        crs=crs,
+        adapter_class=service.get("adapter_class"),
+        **kwargs
+    )
+
+
+def load_dataset(
+    service: ServiceConfig,
+    bbox: Union[BBoxTuple, BoundingBox],
+    chunk_size: Tuple[int, int] = (256, 256),
+    **kwargs
+) -> xr.Dataset:
+    """
+    Load geospatial data as an xarray Dataset.
+    
+    Args:
+        service: Service configuration (from create_wcs_service, etc.)
+        bbox: Bounding box as tuple (min_x, min_y, max_x, max_y) or BoundingBox
+        chunk_size: Dask chunk size (width, height)
+        **kwargs: Additional parameters for the service
+        
+    Returns:
+        xarray.Dataset with Dask backend
+    """
+    # Parse bounding box
+    parsed_bbox = parse_bbox(bbox, service.get("crs", "EPSG:4326"))
+    
+    # Get service parameters
+    service_type = service["type"]
+    service_url = service["url"]
+    
+    # Get coverage/layer identifier based on service type
+    if service_type == "WCS":
+        coverage_id = service["coverage_id"]
+    elif service_type == "WMS":
+        coverage_id = service["layers"]
+    elif service_type == "WMTS":
+        coverage_id = service["layer"]
+    else:
+        raise ValueError(f"Unsupported service type: {service_type}")
+    
+    # Get resolution override
+    resolution = service.get("resolution")
+    if resolution:
+        chunk_size = resolution
+    
+    # Get format
+    try:
+        output_format = Format(service.get("format", "image/tiff"))
+    except ValueError as exc:
+        raise ValueError(f"Unsupported format: {service.get('format')}") from exc
+    
+    # Get CRS
+    try:
+        crs = CRS(service.get("crs", "EPSG:4326"))
+    except ValueError as exc:
+        raise ValueError(f"Unsupported CRS: {service.get('crs')}") from exc
+    
+    # Create dataset using the generic function
+    return create_dataset(
+        service_url=service_url,
+        coverage_id=coverage_id,
+        bbox=parsed_bbox,
+        service_type=service_type,
+        chunk_size=chunk_size,
+        output_format=output_format,
+        crs=crs,
+        adapter_class=service.get("adapter_class"),
+        **kwargs
+    )
+
+
+# Convenience functions for common use cases
+def load_wcs_array(
+    url: str,
+    coverage_id: str,
+    bbox: Union[BBoxTuple, BoundingBox],
+    chunk_size: Tuple[int, int] = (256, 256),
+    **kwargs
+) -> xr.DataArray:
+    """
+    Convenience function to load data from a WCS service.
+    
+    Args:
+        url: WCS service URL
+        coverage_id: Coverage identifier
+        bbox: Bounding box as tuple (min_x, min_y, max_x, max_y) or BoundingBox
+        chunk_size: Dask chunk size (width, height)
+        **kwargs: Additional parameters
+        
+    Returns:
+        xarray.DataArray with Dask backend
+    """
+    service = create_wcs_service(url, coverage_id)
+    return load_array(service, bbox, chunk_size, **kwargs)
+
+
+def load_wms_array(
+    url: str,
+    layers: Union[str, List[str]],
+    bbox: Union[BBoxTuple, BoundingBox],
+    chunk_size: Tuple[int, int] = (256, 256),
+    **kwargs
+) -> xr.DataArray:
+    """
+    Convenience function to load data from a WMS service.
+    
+    Args:
+        url: WMS service URL
+        layers: Layer name(s) to request
+        bbox: Bounding box as tuple (min_x, min_y, max_x, max_y) or BoundingBox
+        chunk_size: Dask chunk size (width, height)
+        **kwargs: Additional parameters
+        
+    Returns:
+        xarray.DataArray with Dask backend
+    """
+    service = create_wms_service(url, layers)
+    return load_array(service, bbox, chunk_size, **kwargs)

@@ -29,19 +29,22 @@ __author__ = "Your Name"
 __email__ = "your.email@example.com"
 
 # High-level user-friendly API
-from .api import (
-    create_bbox, parse_bbox,
-    create_wcs_service, create_wms_service, create_wmts_service,
-    load_array, load_dataset,
-    load_wcs_array, load_wms_array,
-    BBoxTuple, ServiceConfig
-)
-
-# Lower-level API for advanced users
 from .core import (
+    create_bbox, parse_bbox, BBoxTuple, ServiceConfig,
     validate_bbox, bbox_intersects, bbox_union, bbox_intersection,
     create_tile_grid, estimate_tile_size, format_supports_crs,
     get_supported_crs_for_format, get_supported_formats_for_crs
+)
+
+from .array import (
+    create_wcs_service, create_wms_service, create_wmts_service,
+    load_array, load_dataset, load_wcs_array, load_wms_array,
+    create_array, create_dataset
+)
+
+# OGC Implementations
+from .ogc import (
+    WCSParser, WCSClient, WCSTileAdapter, WMSTileAdapter, WMTSAdapter
 )
 
 # Types and Models
@@ -53,14 +56,6 @@ from .types import (
 # Generic Tile Functionality
 from .tiles import (
     fetch_tile, save_tile, create_tile_grid_for_bbox, estimate_optimal_tile_size
-)
-
-# Generic Array Functionality
-from .array import create_array, create_dataset
-
-# OGC Implementations
-from .ogc import (
-    WCSParser, WCSClient, WCSTileAdapter, WMSTileAdapter, WMTSAdapter
 )
 
 # Public API - prioritize the user-friendly functions

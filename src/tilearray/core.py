@@ -2,10 +2,14 @@
 Core generic functionality for tile-based geospatial data processing.
 """
 
-from typing import List, Optional, Tuple, Union
 import logging
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-from .types import BoundingBox, CRS, Format
+from .types import CRS, BoundingBox, Format
+
+# Type aliases for better user experience
+BBoxTuple = Tuple[float, float, float, float]  # (min_x, min_y, max_x, max_y)
+ServiceConfig = Dict[str, Any]
 
 logger = logging.getLogger(__name__)
 
@@ -239,3 +243,60 @@ def get_supported_formats_for_crs(crs: CRS) -> List[Format]:
         if format_supports_crs(format_type, crs):
             supported_formats.append(format_type)
     return supported_formats
+
+
+# User-friendly API functions
+def create_bbox(
+    min_x: float, 
+    min_y: float, 
+    max_x: float, 
+    max_y: float, 
+    crs: str = "EPSG:4326"
+) -> BoundingBox:
+    """
+    Create a bounding box from simple coordinates.
+    
+    Args:
+        min_x: Minimum X coordinate (west)
+        min_y: Minimum Y coordinate (south) 
+        max_x: Maximum X coordinate (east)
+        max_y: Maximum Y coordinate (north)
+        crs: Coordinate reference system (default: WGS84)
+        
+    Returns:
+        BoundingBox object
+        
+    Raises:
+        ValueError: If coordinates are invalid
+    """
+    try:
+        crs_enum = CRS(crs)
+    except ValueError as exc:
+        raise ValueError(f"Unsupported CRS: {crs}") from exc
+    
+    return BoundingBox(
+        min_x=min_x,
+        min_y=min_y, 
+        max_x=max_x,
+        max_y=max_y,
+        crs=crs_enum
+    )
+
+
+def parse_bbox(bbox: Union[BBoxTuple, BoundingBox], crs: str = "EPSG:4326") -> BoundingBox:
+    """
+    Parse a bounding box from various input formats.
+    
+    Args:
+        bbox: Bounding box as tuple (min_x, min_y, max_x, max_y) or BoundingBox object
+        crs: Coordinate reference system (ignored if bbox is already BoundingBox)
+        
+    Returns:
+        BoundingBox object
+    """
+    if isinstance(bbox, BoundingBox):
+        return bbox
+    elif isinstance(bbox, (tuple, list)) and len(bbox) == 4:
+        return create_bbox(bbox[0], bbox[1], bbox[2], bbox[3], crs)
+    else:
+        raise ValueError(f"Invalid bbox format: {bbox}. Expected tuple (min_x, min_y, max_x, max_y) or BoundingBox")
