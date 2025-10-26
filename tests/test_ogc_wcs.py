@@ -3,8 +3,8 @@
 import pytest
 import xml.etree.ElementTree as ET
 from unittest.mock import Mock, patch
-from ogc_array.ogc.wcs import WCSParser, WCSClient
-from ogc_array.ogc.types import (
+from tilearray.ogc import WCSParser, WCSClient
+from tilearray.types import (
     ServiceCapabilities, CoverageDescription, BoundingBox, SpatialExtent,
     CRS, Format, TileRequest, WCSResponse
 )
@@ -231,19 +231,17 @@ class TestWCSClient:
         mock_get.return_value = mock_response
         
         bbox = BoundingBox(min_x=0, min_y=0, max_x=10, max_y=10)
-        tile_request = TileRequest(
+        
+        response = self.client.get_coverage(
             coverage_id="test_coverage",
             bbox=bbox,
             width=256,
             height=256
         )
         
-        response = self.client.get_coverage(tile_request)
-        
         assert response.success is True
         assert response.data == b"test data"
-        assert response.content_type == "image/tiff"
-        assert response.content_length == 9
+        assert response.status_code == 200
         assert response.error_message is None
         
         mock_get.assert_called_once()
@@ -260,14 +258,13 @@ class TestWCSClient:
         mock_get.side_effect = Exception("Network error")
         
         bbox = BoundingBox(min_x=0, min_y=0, max_x=10, max_y=10)
-        tile_request = TileRequest(
+        
+        response = self.client.get_coverage(
             coverage_id="test_coverage",
             bbox=bbox,
             width=256,
             height=256
         )
-        
-        response = self.client.get_coverage(tile_request)
         
         assert response.success is False
         assert "Network error" in response.error_message
@@ -277,40 +274,30 @@ class TestWCSClient:
 class TestWCSIntegration:
     """Integration tests for WCS functionality."""
     
-    def test_tile_request_to_wcs_params(self):
-        """Test tile request parameter conversion."""
+    def test_wcs_tile_adapter(self):
+        """Test WCS tile adapter parameter conversion."""
         bbox = BoundingBox(min_x=0, min_y=0, max_x=10, max_y=10)
-        tile_request = TileRequest(
+        
+        from tilearray.ogc import WCSTileAdapter
+        tile_request = WCSTileAdapter.create_tile_request(
+            base_url="http://example.com/wcs",
             coverage_id="test_coverage",
             bbox=bbox,
             width=256,
             height=256,
-            format=Format.GEOTIFF,
+            output_format=Format.GEOTIFF,
             crs=CRS.EPSG_4326
         )
         
-        params = tile_request.to_wcs_params()
-        
-        expected_params = {
-            "service": "WCS",
-            "version": "2.0.1",
-            "request": "GetCoverage",
-            "coverageId": "test_coverage",
-            "subset": "Long(0,10)",  # Note: This might need adjustment based on actual implementation
-            "size": "256,256",
-            "format": "image/tiff",
-            "crs": "EPSG:4326",
-            "interpolation": "nearest"
-        }
-        
-        assert params["service"] == expected_params["service"]
-        assert params["version"] == expected_params["version"]
-        assert params["request"] == expected_params["request"]
-        assert params["coverageId"] == expected_params["coverageId"]
-        assert params["size"] == expected_params["size"]
-        assert params["format"] == expected_params["format"]
-        assert params["crs"] == expected_params["crs"]
-        assert params["interpolation"] == expected_params["interpolation"]
+        assert tile_request.url == "http://example.com/wcs"
+        assert tile_request.params["service"] == "WCS"
+        assert tile_request.params["version"] == "2.0.1"
+        assert tile_request.params["request"] == "GetCoverage"
+        assert tile_request.params["coverageId"] == "test_coverage"
+        assert tile_request.params["width"] == "256"
+        assert tile_request.params["height"] == "256"
+        assert tile_request.params["format"] == Format.GEOTIFF.value
+        assert tile_request.output_format == Format.GEOTIFF
     
     def test_coverage_description_validation(self):
         """Test coverage description validation."""

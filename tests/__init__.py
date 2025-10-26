@@ -1,1 +1,1 @@
-"""Test package for ogc_array."""
+"""Test package for tilearray."""

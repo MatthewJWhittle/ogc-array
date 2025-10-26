@@ -1,5 +1,5 @@
 """
-OGC type definitions and models.
+Generic type definitions and models for tile-based geospatial data processing.
 """
 
 from typing import List, Optional, Dict, Any, Union
@@ -45,15 +45,14 @@ class BoundingBox(BaseModel):
 class SpatialExtent(BaseModel):
     """Spatial extent information."""
     bbox: BoundingBox
-    crs: CRS = Field(default=CRS.EPSG_4326)
-    dimensions: int = Field(default=2, ge=2, le=3, description="Number of spatial dimensions")
+    dimensions: Optional[Dict[str, Any]] = Field(None, description="Optional dimension details")
 
 
 class TemporalExtent(BaseModel):
     """Temporal extent information."""
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
-    
+
     @model_validator(mode='after')
     def validate_temporal_order(self):
         """Validate that end_time is after start_time."""
@@ -65,19 +64,17 @@ class TemporalExtent(BaseModel):
 class CoverageDescription(BaseModel):
     """Coverage description from WCS GetCapabilities."""
     identifier: str = Field(..., description="Coverage identifier")
-    title: str = Field(..., description="Coverage title")
+    title: Optional[str] = None
     abstract: Optional[str] = None
     keywords: List[str] = Field(default_factory=list)
-    spatial_extent: SpatialExtent
-    temporal_extent: Optional[TemporalExtent] = None
-    supported_formats: List[Format] = Field(default_factory=list)
     supported_crs: List[CRS] = Field(default_factory=list)
-    native_crs: CRS = Field(default=CRS.EPSG_4326)
-    native_format: Format = Field(default=Format.GEOTIFF)
+    supported_formats: List[Format] = Field(default_factory=list)
+    spatial_extent: Optional[SpatialExtent] = None
+    temporal_extent: Optional[TemporalExtent] = None
 
 
 class ServiceCapabilities(BaseModel):
-    """WCS service capabilities."""
+    """WCS Service Capabilities."""
     service_title: str
     service_abstract: Optional[str] = None
     service_keywords: List[str] = Field(default_factory=list)
@@ -93,37 +90,30 @@ class ServiceCapabilities(BaseModel):
 
 
 class TileRequest(BaseModel):
-    """Tile request parameters."""
-    coverage_id: str = Field(..., description="Coverage identifier")
-    bbox: BoundingBox = Field(..., description="Bounding box for the tile")
-    width: int = Field(..., gt=0, description="Output width in pixels")
-    height: int = Field(..., gt=0, description="Output height in pixels")
-    format: Format = Field(default=Format.GEOTIFF, description="Output format")
-    crs: CRS = Field(default=CRS.EPSG_4326, description="Output CRS")
-    subset: Optional[Dict[str, Any]] = Field(default=None, description="Additional subset parameters")
-    interpolation: str = Field(default="nearest", description="Interpolation method")
-    
-    def to_wcs_params(self) -> Dict[str, Any]:
-        """Convert to WCS GetCoverage parameters."""
-        return {
-            "service": "WCS",
-            "version": "2.0.1",
-            "request": "GetCoverage",
-            "coverageId": self.coverage_id,
-            "subset": f"Long({self.bbox.min_x},{self.bbox.max_x})",
-            "subset": f"Lat({self.bbox.min_y},{self.bbox.max_y})",
-            "size": f"{self.width},{self.height}",
-            "format": self.format.value,
-            "crs": self.crs.value,
-            "interpolation": self.interpolation
-        }
+    """Generic tile request parameters."""
+    url: str
+    params: Dict[str, Any]
+    headers: Optional[Dict[str, str]] = None
+    timeout: int = 30
+    retries: int = 3
+    output_format: Optional[Format] = None
+    crs: Optional[CRS] = None
+
+
+class TileResponse(BaseModel):
+    """Response from tile request."""
+    data: bytes
+    content_type: str
+    status_code: int
+    headers: Dict[str, str]
+    url: str
+    success: bool
+    error_message: Optional[str] = None
 
 
 class WCSResponse(BaseModel):
-    """WCS response wrapper."""
-    success: bool
-    data: Optional[Any] = None
-    error_message: Optional[str] = None
-    content_type: Optional[str] = None
-    content_length: Optional[int] = None
-    metadata: Optional[Dict[str, Any]] = None
+    """Represents a WCS response, either successful data or an error."""
+    success: bool = Field(..., description="True if the request was successful, False otherwise")
+    data: Optional[Any] = Field(None, description="The response data (e.g., image bytes, NetCDF data)")
+    error_message: Optional[str] = Field(None, description="Error message if the request failed")
+    status_code: Optional[int] = Field(None, description="HTTP status code of the response")

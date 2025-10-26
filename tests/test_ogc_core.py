@@ -2,11 +2,11 @@
 
 import pytest
 from datetime import datetime
-from ogc_array.ogc.types import (
+from tilearray.types import (
     BoundingBox, SpatialExtent, TemporalExtent, CoverageDescription,
     ServiceCapabilities, TileRequest, WCSResponse, CRS, Format
 )
-from ogc_array.ogc.core import (
+from tilearray.core import (
     validate_bbox, bbox_intersects, bbox_union, bbox_intersection,
     create_tile_grid, estimate_tile_size, format_supports_crs,
     get_supported_crs_for_format, get_supported_formats_for_crs
@@ -49,14 +49,14 @@ class TestSpatialExtent:
         bbox = BoundingBox(min_x=0, min_y=0, max_x=10, max_y=10)
         extent = SpatialExtent(bbox=bbox)
         assert extent.bbox == bbox
-        assert extent.crs == CRS.EPSG_4326
-        assert extent.dimensions == 2
+        assert extent.bbox.crs == CRS.EPSG_4326
+        assert extent.dimensions is None
     
     def test_custom_dimensions(self):
         """Test custom dimensions."""
         bbox = BoundingBox(min_x=0, min_y=0, max_x=10, max_y=10)
-        extent = SpatialExtent(bbox=bbox, dimensions=3)
-        assert extent.dimensions == 3
+        extent = SpatialExtent(bbox=bbox, dimensions={"x": 10, "y": 10})
+        assert extent.dimensions == {"x": 10, "y": 10}
 
 
 class TestTemporalExtent:
@@ -97,8 +97,8 @@ class TestCoverageDescription:
         assert coverage.title == "Test Coverage"
         assert coverage.abstract == "A test coverage"
         assert coverage.spatial_extent == spatial_extent
-        assert coverage.native_crs == CRS.EPSG_4326
-        assert coverage.native_format == Format.GEOTIFF
+        assert coverage.spatial_extent.bbox.crs == CRS.EPSG_4326
+        assert coverage.supported_formats == []
 
 
 class TestServiceCapabilities:
@@ -124,37 +124,32 @@ class TestTileRequest:
         """Test tile request creation."""
         bbox = BoundingBox(min_x=0, min_y=0, max_x=10, max_y=10)
         request = TileRequest(
-            coverage_id="test_coverage",
-            bbox=bbox,
-            width=256,
-            height=256
+            url="http://example.com/wcs",
+            params={"service": "WCS", "request": "GetCoverage"},
+            output_format=Format.GEOTIFF,
+            crs=CRS.EPSG_4326
         )
         
-        assert request.coverage_id == "test_coverage"
-        assert request.bbox == bbox
-        assert request.width == 256
-        assert request.height == 256
-        assert request.format == Format.GEOTIFF
+        assert request.url == "http://example.com/wcs"
+        assert request.params == {"service": "WCS", "request": "GetCoverage"}
+        assert request.output_format == Format.GEOTIFF
         assert request.crs == CRS.EPSG_4326
     
-    def test_tile_request_to_wcs_params(self):
-        """Test conversion to WCS parameters."""
-        bbox = BoundingBox(min_x=0, min_y=0, max_x=10, max_y=10)
+    def test_tile_request_optional_fields(self):
+        """Test tile request with optional fields."""
         request = TileRequest(
-            coverage_id="test_coverage",
-            bbox=bbox,
-            width=256,
-            height=256
+            url="http://example.com/wcs",
+            params={"service": "WCS", "request": "GetCoverage"},
+            headers={"Accept": "image/tiff"},
+            timeout=60,
+            retries=5
         )
         
-        params = request.to_wcs_params()
-        assert params["service"] == "WCS"
-        assert params["version"] == "2.0.1"
-        assert params["request"] == "GetCoverage"
-        assert params["coverageId"] == "test_coverage"
-        assert params["size"] == "256,256"
-        assert params["format"] == Format.GEOTIFF.value
-        assert params["crs"] == CRS.EPSG_4326.value
+        assert request.url == "http://example.com/wcs"
+        assert request.params == {"service": "WCS", "request": "GetCoverage"}
+        assert request.headers == {"Accept": "image/tiff"}
+        assert request.timeout == 60
+        assert request.retries == 5
 
 
 class TestWCSResponse:
@@ -165,14 +160,12 @@ class TestWCSResponse:
         response = WCSResponse(
             success=True,
             data=b"test data",
-            content_type="image/tiff",
-            content_length=9
+            status_code=200
         )
         
         assert response.success is True
         assert response.data == b"test data"
-        assert response.content_type == "image/tiff"
-        assert response.content_length == 9
+        assert response.status_code == 200
         assert response.error_message is None
     
     def test_error_response(self):
