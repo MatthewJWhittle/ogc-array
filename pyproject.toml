@@ -24,7 +24,10 @@ classifiers = [
 requires-python = ">=3.9"
 dependencies = [
     "dask>=2024.8.0",
+    "httpx>=0.28.1",
+    "numpy>=2.0.2",
     "pydantic>=2.12.3",
+    "pyproj>=3.6.1",
     "requests>=2.32.5",
     "xarray>=2024.7.0",
 ]
@@ -117,12 +120,17 @@ disallow_untyped_defs = false
 
 [tool.coverage.run]
 source = ["src/tilearray"]
+branch = true
 omit = [
     "*/tests/*",
     "*/test_*",
+    "*/__pycache__/*",
+    "*/.*",
 ]
 
 [tool.coverage.report]
+fail_under = 85
+show_missing = true
 exclude_lines = [
     "pragma: no cover",
     "def __repr__",
@@ -138,7 +146,14 @@ exclude_lines = [
 
 [dependency-groups]
 dev = [
+    "coverage>=7.10.7",
+    "hypothesis>=6.141.1",
     "ipykernel>=6.31.0",
     "jupyter>=1.1.1",
     "pytest-cov>=7.0.0",
+    "pytest-httpserver>=1.1.3",
+    "pytest-timeout>=2.4.0",
+    "pytest-vcr>=1.0.2",
+    "pytest-xdist>=3.8.0",
+    "respx>=0.22.0",
 ]

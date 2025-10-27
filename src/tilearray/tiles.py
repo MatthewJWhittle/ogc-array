@@ -8,6 +8,8 @@ import requests
 import logging
 from pathlib import Path
 
+import numpy as np
+
 from .types import BoundingBox, CRS, Format, TileRequest, TileResponse
 
 logger = logging.getLogger(__name__)
@@ -135,40 +137,28 @@ def save_tile(tile_response: TileResponse, output_path: Union[str, Path]) -> boo
         return False
 
 
-# Utility functions for tile grid generation
-def create_tile_grid_for_bbox(
-    bbox: BoundingBox,
-    tile_size: float,
-    overlap: float = 0.0
-) -> List[BoundingBox]:
+# Tile Operations
+def create_tile_grid(
+    bbox: BoundingBox, 
+    tile_size: Tuple[int, int],
+    origin : Tuple[float, float],
+    resolution : Tuple[float, float],
+    ) -> np.ndarray:
     """
-    Create a grid of tiles covering a bounding box.
-    
+    Create a grid of tiles covering the bounding box with the given tile size, origin and resolution. 
+    If the bounding box isn't aligned with the grid the tiles will cover the entire bounding box.
+
     Args:
         bbox: Overall bounding box
-        tile_size: Size of each tile in degrees
-        overlap: Overlap between tiles in degrees
-        
+        tile_size: Size of each tile in pixels
+        origin: Origin of the grid in the given CRS
+        resolution: Resolution of the grid in pixels per unit of the given CRS
+
     Returns:
-        List of tile bounding boxes
+        A numpy array of tile bounding boxes
+
     """
-    from .core import create_tile_grid
-    return create_tile_grid(bbox, tile_size, overlap)
+
+    raise NotImplementedError("Not implemented")
 
 
-def estimate_optimal_tile_size(
-    bbox: BoundingBox,
-    target_pixels: int = 256
-) -> float:
-    """
-    Estimate optimal tile size for a bounding box.
-    
-    Args:
-        bbox: Bounding box
-        target_pixels: Target number of pixels per side
-        
-    Returns:
-        Suggested tile size in degrees
-    """
-    from .core import estimate_tile_size
-    return estimate_tile_size(bbox, target_pixels)
