@@ -1,0 +1,422 @@
+from pathlib import Path
+from typing import Any, Callable, List, Tuple, cast
+
+import base64
+import numpy as np
+import pytest
+import xarray as xr
+
+import tilearray.array as array_module
+from tilearray.array import ArrayRequest, _organize_tiles
+from pytest import MonkeyPatch
+from tilearray.service.base import BaseService, TileGeometry
+from tilearray.service.config import WCSConfig
+from tilearray.types import BoundingBox, CRS, Format, ServiceTypeEnum, TileRequest, TileResponse
+
+
+@pytest.fixture(autouse=True)
+def preserve_decoder_registry():
+    original = dict(array_module._DECODER_REGISTRY)
+    try:
+        yield
+    finally:
+        array_module._DECODER_REGISTRY = original
+
+
+class DummyService:
+    service_type = ServiceTypeEnum.WCS
+    coverage_id = "dummy"
+    output_format = Format.GEOTIFF
+
+    def generate_tile_requests(
+        self,
+        bbox: BoundingBox,
+        chunk_size: Tuple[int, int],
+        **options: Any,
+    ) -> List[TileRequest]:
+        width, height = chunk_size
+        return [
+            TileRequest(
+                url="http://example.com/wcs",
+                params={"tile": "0"},
+                output_format=Format.GEOTIFF,
+                crs=bbox.crs,
+                bbox=bbox,
+                width=width,
+                height=height,
+            )
+        ]
+
+
+def test_array_request_from_inputs_applies_defaults() -> None:
+    config = WCSConfig.from_url(
+        "http://example.com/wcs",
+        coverage_id="cov",
+        chunk_size=(128, 128),
+        grid_shape=(2, 3),
+        resolution=(4.0, 4.0),
+    )
+    bbox = BoundingBox(min_x=0, min_y=0, max_x=512, max_y=1024, crs=CRS.EPSG_4326)
+
+    request = ArrayRequest.from_inputs(
+        service_url=config.base_url,
+        service_config=config,
+        bbox_input=bbox,
+        crs_input=CRS.EPSG_4326,
+        chunk_size_input=None,
+        grid_shape_input=None,
+        output_format_input=None,
+        cache_dir_input=None,
+        service_options_input={},
+    )
+
+    assert request.chunk_size == (128, 128)
+    assert request.grid_shape == (2, 3)
+    assert request.resolution == (4.0, 4.0)
+    assert request.output_format == config.output_format
+    assert request.service_url == config.base_url
+
+
+def test_array_request_infers_grid_from_resolution() -> None:
+    bbox = (0.0, 0.0, 512.0, 512.0)
+
+    request = ArrayRequest.from_inputs(
+        service_url="http://example.com/wcs",
+        service_config=None,
+        bbox_input=bbox,
+        crs_input=CRS.EPSG_4326,
+        chunk_size_input=(256, 256),
+        grid_shape_input=None,
+        output_format_input=Format.PNG,
+        cache_dir_input=None,
+        service_options_input={"resolution": (1.0, 1.0)},
+    )
+
+    assert request.grid_shape == (2, 2)
+    assert request.resolution == (1.0, 1.0)
+
+
+def test_create_array_with_custom_decoder(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    bbox = (-1.0, 50.0, -0.5, 50.5)
+    calls: List[TileRequest] = []
+
+    def fake_get_service(*args: Any, **kwargs: Any) -> DummyService:
+        return DummyService()
+
+    def fake_fetch_tile(request: TileRequest) -> TileResponse:
+        calls.append(request)
+        width = request.width or 1
+        height = request.height or 1
+        return TileResponse(
+            data=b"\x00" * (width * height),
+            content_type="application/octet-stream",
+            status_code=200,
+            headers={},
+            url=request.url,
+            success=True,
+            error_message=None,
+        )
+
+    monkeypatch.setattr(array_module, "get_service", fake_get_service)
+    monkeypatch.setattr(array_module, "fetch_tile", fake_fetch_tile)
+
+    def decoder(response: TileResponse, request: TileRequest) -> np.ndarray:
+        height = request.height or 1
+        width = request.width or 1
+        return np.ones((height, width), dtype=np.float32)
+
+    array_module.register_tile_decoder(Format.GEOTIFF, decoder)
+
+    result = array_module.create_array(
+        service_url="http://example.com/wcs",
+        bbox=bbox,
+        crs=CRS.EPSG_4326,
+        chunk_size=(8, 8),
+        cache_dir=tmp_path,
+    )
+
+    assert result.dims == ("y", "x")
+    assert result.shape == (8, 8)
+    compute_fn = cast(Callable[[], xr.DataArray], result.compute)
+    computed = compute_fn()
+    assert np.allclose(computed, 1.0)
+    assert calls, "Expected fetch_tile to be called"
+
+
+def test_create_array_without_decoder_raises(monkeypatch: MonkeyPatch) -> None:
+    def fake_service_factory(*args: Any, **kwargs: Any) -> DummyService:
+        return DummyService()
+
+    monkeypatch.setattr(array_module, "get_service", fake_service_factory)
+    monkeypatch.setattr(array_module, "_DECODER_REGISTRY", {})
+
+    with pytest.raises(RuntimeError):
+        array_module.create_array(
+            service_url="http://example.com/wcs",
+            bbox=BoundingBox(min_x=0, min_y=0, max_x=1, max_y=1, crs=CRS.EPSG_4326),
+            crs=CRS.EPSG_4326,
+        )
+
+
+def test_create_array_with_service_config(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    config = WCSConfig.from_url(
+        "http://example.com/wcs",
+        coverage_id="dummy",
+        chunk_size=(4, 4),
+        cache_dir=tmp_path,
+    )
+
+    calls: List[TileRequest] = []
+
+    def fake_build_service(self: WCSConfig) -> DummyService:
+        return DummyService()
+
+    def fake_fetch_tile(request: TileRequest) -> TileResponse:
+        calls.append(request)
+        width = request.width or 1
+        height = request.height or 1
+        return TileResponse(
+            data=b"\x00" * (width * height),
+            content_type="application/octet-stream",
+            status_code=200,
+            headers={},
+            url=request.url,
+            success=True,
+            error_message=None,
+        )
+
+    monkeypatch.setattr(WCSConfig, "build_service", fake_build_service)
+    monkeypatch.setattr(array_module, "fetch_tile", fake_fetch_tile)
+
+    def decoder(response: TileResponse, request: TileRequest) -> np.ndarray:
+        height = request.height or 1
+        width = request.width or 1
+        return np.ones((height, width), dtype=np.float32)
+
+    array_module.register_tile_decoder(Format.GEOTIFF, decoder)
+
+    result = array_module.create_array(
+        service_url=config,
+        bbox=BoundingBox(min_x=0, min_y=0, max_x=1, max_y=1, crs=CRS.EPSG_4326),
+        crs=CRS.EPSG_4326,
+    )
+
+    assert result.shape == (4, 4)
+    compute_fn = cast(Callable[[], xr.DataArray], result.compute)
+    computed = compute_fn()
+    assert np.allclose(computed, 1.0)
+    assert result.attrs["service_url"] == config.base_url
+    assert result.attrs["coverage_id"] == "dummy"
+    assert calls, "Expected fetch_tile to be called"
+
+
+def test_create_array_infers_decoder_from_service(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    class DecoderService(DummyService):
+        output_format = Format.GEOTIFF
+
+    def fake_get_service(*args: Any, **kwargs: Any) -> DecoderService:
+        return DecoderService()
+
+    def fake_fetch_tile(request: TileRequest) -> TileResponse:
+        width = request.width or 1
+        height = request.height or 1
+        return TileResponse(
+            data=b"\x00" * (width * height),
+            content_type="application/octet-stream",
+            status_code=200,
+            headers={},
+            url=request.url,
+            success=True,
+            error_message=None,
+        )
+
+    def decoder(response: TileResponse, request: TileRequest) -> np.ndarray:
+        height = request.height or 1
+        width = request.width or 1
+        return np.ones((height, width), dtype=np.float32)
+
+    array_module.register_tile_decoder(Format.GEOTIFF, decoder)
+    monkeypatch.setattr(array_module, "get_service", fake_get_service)
+    monkeypatch.setattr(array_module, "fetch_tile", fake_fetch_tile)
+
+    result = array_module.create_array(
+        service_url="http://example.com/wcs",
+        bbox=(-1.0, 50.0, -0.5, 50.5),
+        crs=CRS.EPSG_4326,
+        chunk_size=(4, 4),
+        cache_dir=tmp_path,
+    )
+
+    compute_fn = cast(Callable[[], xr.DataArray], result.compute)
+    computed = compute_fn()
+    assert computed.shape == (4, 4)
+    assert np.allclose(computed, 1.0)
+
+
+def test_builtin_png_decoder(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    class PNGService(BaseService):
+        service_type = ServiceTypeEnum.WCS
+
+        def __init__(self) -> None:
+            super().__init__("http://example.com")
+            self.output_format = Format.PNG
+
+        def generate_tile_requests(
+            self,
+            bbox: BoundingBox,
+            chunk_size: Tuple[int, int],
+            **options: Any,
+        ) -> List[TileRequest]:
+            width, height = chunk_size
+            return [
+                TileRequest(
+                    url="http://example.com/png",
+                    params={},
+                    output_format=Format.PNG,
+                    crs=bbox.crs,
+                    bbox=bbox,
+                    width=width,
+                    height=height,
+                )
+            ]
+
+        def build_tile_request(self, tile: TileGeometry, **options: Any) -> TileRequest:
+            return self.generate_tile_requests(tile.bbox, (tile.width, tile.height))[0]
+
+    png_data = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFUlEQVR4nGP4//8/AxJgYGBg+I8BADCBA/5Yy7d/AAAAAElFTkSuQmCC"
+    )
+
+    def fake_get_service(*args: Any, **kwargs: Any) -> PNGService:
+        return PNGService()
+
+    def fake_fetch_tile(request: TileRequest) -> TileResponse:
+        return TileResponse(
+            data=png_data,
+            content_type="image/png",
+            status_code=200,
+            headers={},
+            url=request.url,
+            success=True,
+            error_message=None,
+        )
+
+    monkeypatch.setattr(array_module, "get_service", fake_get_service)
+    monkeypatch.setattr(array_module, "fetch_tile", fake_fetch_tile)
+
+    result = array_module.create_array(
+        service_url="http://example.com/png",
+        bbox=(-1.0, 50.0, -0.5, 50.5),
+        crs=CRS.EPSG_4326,
+        chunk_size=(2, 2),
+        cache_dir=tmp_path,
+    )
+
+    computed = cast(Callable[[], xr.DataArray], result.compute)()
+    assert computed.shape == (2, 2)
+
+
+def test_plan_tiles_uses_resolution() -> None:
+    recorded: List[TileRequest] = []
+
+    class RecordingService(BaseService):
+        service_type = ServiceTypeEnum.WCS
+
+        def __init__(self) -> None:
+            super().__init__("http://example.com")
+
+        def build_tile_request(self, tile: TileGeometry, **options: Any) -> TileRequest:
+            request = TileRequest(
+                url="http://example.com/wcs",
+                params={},
+                output_format=Format.GEOTIFF,
+                crs=tile.crs,
+                bbox=tile.bbox,
+                width=tile.width,
+                height=tile.height,
+            )
+            recorded.append(request)
+            return request
+
+    service = RecordingService()
+    bbox = BoundingBox(min_x=0, min_y=0, max_x=1000, max_y=1000, crs=CRS.EPSG_4326)
+    requests = service.generate_tile_requests(
+        bbox,
+        (500, 500),
+        resolution=(1.0, 1.0),
+    )
+
+    assert len(requests) == 4
+    assert {req.width for req in recorded} == {500}
+    assert {req.height for req in recorded} == {500}
+
+
+def test_organize_tiles_orders_by_bbox() -> None:
+    bbox = BoundingBox(min_x=0, min_y=0, max_x=2, max_y=2, crs=CRS.EPSG_4326)
+
+    def _tile(x_index: int, y_index: int) -> TileRequest:
+        min_x = x_index
+        max_x = x_index + 1
+        min_y = y_index
+        max_y = y_index + 1
+        return TileRequest(
+            url="http://example.com",
+            params={},
+            output_format=Format.GEOTIFF,
+            crs=bbox.crs,
+            bbox=BoundingBox(min_x=min_x, min_y=min_y, max_x=max_x, max_y=max_y, crs=bbox.crs),
+            width=1,
+            height=1,
+        )
+
+    tiles = [
+        _tile(0, 0),  # bottom-left
+        _tile(1, 1),  # top-right
+        _tile(1, 0),  # bottom-right
+        _tile(0, 1),  # top-left
+    ]
+
+    grid = _organize_tiles(tiles, rows=2, cols=2)
+    assert grid[0][0].bbox.min_y == 1  # top row first
+    assert grid[1][0].bbox.min_y == 0  # bottom row second
+    assert grid[0][0].bbox.min_x == 0  # left-to-right within row
+    assert grid[0][1].bbox.min_x == 1
+
+
+def test_create_array_downsamples_oversized_tiles(monkeypatch: MonkeyPatch) -> None:
+    bbox = BoundingBox(min_x=0, min_y=0, max_x=1, max_y=1, crs=CRS.EPSG_4326)
+
+    def fake_get_service(*args: Any, **kwargs: Any) -> DummyService:
+        return DummyService()
+
+    def fake_fetch_tile(request: TileRequest) -> TileResponse:
+        return TileResponse(
+            data=b"",
+            content_type="image/tiff",
+            status_code=200,
+            headers={},
+            url=request.url,
+            success=True,
+            error_message=None,
+        )
+
+    monkeypatch.setattr(array_module, "get_service", fake_get_service)
+    monkeypatch.setattr(array_module, "fetch_tile", fake_fetch_tile)
+
+    def decoder(response: TileResponse, request: TileRequest) -> np.ndarray:
+        height = (request.height or 1) * 2
+        width = (request.width or 1) * 2
+        return np.ones((height, width), dtype=np.float32)
+
+    array_module.register_tile_decoder(Format.GEOTIFF, decoder)
+
+    result = array_module.create_array(
+        service_url="http://example.com/wcs",
+        bbox=bbox,
+        crs=CRS.EPSG_4326,
+        chunk_size=(256, 256),
+    )
+
+    computed = result.compute()
+    assert computed.shape == (256, 256)
+    assert float(computed.mean()) == 1.0

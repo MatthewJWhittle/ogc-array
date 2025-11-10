@@ -2,10 +2,12 @@
 Generic type definitions and models for tile-based geospatial data processing.
 """
 
-from typing import List, Optional, Dict, Any, Union, Tuple, Callable
-from pydantic import BaseModel, Field, field_validator, model_validator
-from datetime import datetime
+from typing import List, Optional, Dict, Any, Union, Tuple
 from enum import Enum
+from datetime import datetime
+
+from pyproj import Transformer
+from pydantic import BaseModel, Field, model_validator
 
 
 class CRS(str, Enum):
@@ -46,18 +48,10 @@ class CRS(str, Enum):
 class Format(str, Enum):
     """Supported output formats."""
     GEOTIFF = "image/tiff"
-    NETCDF = "application/netcdf"
-    HDF5 = "application/x-hdf5"
-    JSON = "application/json"
+    PNG = "image/png"
+    JPEG = "image/jpeg"
 
-
-
-class BBoxTuple(Tuple[float, float, float, float]):
-    """Bounding box tuple."""
-    min_x: float
-    min_y: float
-    max_x: float
-    max_y: float
+BBoxTuple = Tuple[float, float, float, float]
 
 class BoundingBox(BaseModel):
     """Bounding box representation."""
@@ -77,13 +71,36 @@ class BoundingBox(BaseModel):
         return self
 
     @classmethod
-    def from_tuple(cls, bbox: BBoxTuple) -> "BoundingBox":
+    def from_tuple(
+        cls,
+        bbox: BBoxTuple,
+        crs: Union[CRS, str, int] = CRS.EPSG_4326,
+    ) -> "BoundingBox":
         """Create BoundingBox from tuple."""
-        return cls(min_x=bbox.min_x, min_y=bbox.min_y, max_x=bbox.max_x, max_y=bbox.max_y, crs=bbox.crs)
+
+        if isinstance(crs, CRS):
+            target_crs = crs
+        elif isinstance(crs, str):
+            crs_upper = crs.upper()
+            if crs_upper.startswith("EPSG:"):
+                target_crs = CRS.from_string(crs_upper)
+            else:
+                target_crs = CRS.from_integer(int(crs))
+        else:
+            target_crs = CRS.from_integer(crs)
+
+        return cls(min_x=bbox[0], min_y=bbox[1], max_x=bbox[2], max_y=bbox[3], crs=target_crs)
 
     def intersects(self, other: "BoundingBox") -> bool:
         """Check if this bounding box intersects with another."""
         return self.min_x < other.max_x and self.max_x > other.min_x and self.min_y < other.max_y and self.max_y > other.min_y
+
+    def to_crs(self, crs: CRS) -> "BoundingBox":
+        """Transform the bounding box to a new CRS."""
+        transformer = Transformer.from_crs(self.crs, crs, always_xy=True)
+        xmin, ymin = transformer.transform(self.min_x, self.min_y)
+        xmax, ymax = transformer.transform(self.max_x, self.max_y)
+        return BoundingBox(min_x=xmin, min_y=ymin, max_x=xmax, max_y=ymax, crs=crs)
 
 class SpatialExtent(BaseModel):
     """Spatial extent information."""
@@ -134,6 +151,7 @@ class ServiceCapabilities(BaseModel):
 
 class TileRequest(BaseModel):
     """Generic tile request parameters."""
+
     url: str
     params: Dict[str, Any]
     headers: Optional[Dict[str, str]] = None
@@ -141,6 +159,9 @@ class TileRequest(BaseModel):
     retries: int = 3
     output_format: Optional[Format] = None
     crs: Optional[CRS] = None
+    bbox: Optional[BoundingBox] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
 
 
 class TileResponse(BaseModel):
@@ -167,24 +188,3 @@ class ServiceTypeEnum(str, Enum):
     WCS = "WCS"
     WMS = "WMS"
     WMTS = "WMTS"
-
-
-class ServiceConfig(BaseModel):
-    """Service configuration."""
-    url: str
-    layer_id: str
-    service_type: ServiceTypeEnum
-    crs: CRS
-    format: Format = Format.GEOTIFF
-    resolution: Optional[Tuple[int, int]] = None
-    chunk_size: Optional[Tuple[int, int]] = None
-    timeout: int = 30
-    retries: int = 3
-    headers: Optional[Dict[str, str]] = None
-    params: Optional[Dict[str, Any]] = None
-    adapter_class: Optional[Callable] = None
-
-    @field_validator('service_type', mode='before')
-    def validate_service_type(cls, v: str) -> ServiceTypeEnum  :
-        """Validate service type."""
-        return ServiceTypeEnum(v)

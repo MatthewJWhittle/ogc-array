@@ -1,0 +1,154 @@
+"""Configuration helpers for constructing service instances."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Dict, Optional, Tuple, Union
+
+from pydantic import BaseModel, Field
+
+from ..types import CRS, Format, ServiceTypeEnum
+from .base import BaseService, get_service
+from requests import RequestException
+
+
+class ServiceConfig(BaseModel):
+    """Serializable configuration describing how to build a service instance."""
+
+    base_url: str = Field(..., description="Base endpoint URL for the service")
+    service_type: ServiceTypeEnum = Field(..., description="Type of service to instantiate")
+    crs: Optional[CRS] = Field(
+        None, description="Preferred coordinate reference system for requests"
+    )
+    output_format: Optional[Format] = Field(
+        None, description="Preferred data format for tile requests"
+    )
+    headers: Dict[str, str] = Field(
+        default_factory=dict, description="Additional HTTP headers to include"
+    )
+    params: Dict[str, Any] = Field(
+        default_factory=dict, description="Additional query parameters to include"
+    )
+    chunk_size: Optional[Tuple[int, int]] = Field(
+        None,
+        description="Default chunk size (width, height) to use when building arrays",
+    )
+    grid_shape: Optional[Tuple[int, int]] = Field(
+        None,
+        description="Default grid shape (rows, cols) to use when planning tiles",
+    )
+    cache_dir: Optional[Union[str, Path]] = Field(
+        None, description="Optional cache directory for fetched tiles"
+    )
+    resolution: Optional[Tuple[float, float]] = Field(
+        None,
+        description="Native resolution of the service responses (units per pixel in X and Y)",
+    )
+
+    def build_service(self) -> BaseService:
+        """Create the appropriate service implementation for this configuration."""
+
+        return get_service(
+            self.base_url,
+            service_type=self.service_type,
+            **self.service_kwargs(),
+        )
+
+    # ------------------------------------------------------------------
+    # Helper accessors
+    # ------------------------------------------------------------------
+    def service_kwargs(self) -> Dict[str, Any]:
+        """Keyword arguments used when instantiating the service."""
+
+        kwargs: Dict[str, Any] = {}
+        if self.crs is not None:
+            kwargs["crs"] = self.crs
+        if self.output_format is not None:
+            kwargs["output_format"] = self.output_format
+        if self.headers:
+            kwargs["headers"] = dict(self.headers)
+        if self.params:
+            kwargs["params"] = dict(self.params)
+        return kwargs
+
+    def tile_kwargs(self) -> Dict[str, Any]:
+        """Keyword arguments provided to the tile request planner."""
+
+        kwargs: Dict[str, Any] = {}
+        if self.crs is not None:
+            kwargs["crs"] = self.crs
+        if self.output_format is not None:
+            kwargs["output_format"] = self.output_format
+        if self.params:
+            kwargs["params"] = dict(self.params)
+        if self.headers:
+            kwargs["headers"] = dict(self.headers)
+        if self.resolution is not None:
+            kwargs["resolution"] = self.resolution
+        return kwargs
+
+    def array_defaults(self) -> Dict[str, Any]:
+        """Default array-level configuration supplied by the service."""
+
+        defaults: Dict[str, Any] = {}
+        if self.chunk_size is not None:
+            defaults["chunk_size"] = self.chunk_size
+        if self.grid_shape is not None:
+            defaults["grid_shape"] = self.grid_shape
+        if self.cache_dir is not None:
+            defaults["cache_dir"] = self.cache_dir
+        if self.resolution is not None:
+            defaults["resolution"] = self.resolution
+        return defaults
+
+
+class WCSConfig(ServiceConfig):
+    """Configuration helper for Web Coverage Services."""
+
+    coverage_id: str = Field(..., description="Coverage identifier to request")
+    version: str = Field(default="2.0.1", description="WCS protocol version")
+    service_type: ServiceTypeEnum = Field(
+        default=ServiceTypeEnum.WCS, init=False, description="Service type constant"
+    )
+
+    @classmethod
+    def from_url(cls, url: str, coverage_id: str, **kwargs: Any) -> "WCSConfig":
+        """Convenience constructor mirroring high-level usage patterns."""
+
+        return cls(base_url=url, coverage_id=coverage_id, **kwargs)
+
+    def build_service(self) -> BaseService:
+        """Construct a ``WCSService`` instance from this configuration."""
+
+        from .wcs import WCSService
+
+        kwargs = self.service_kwargs()
+        kwargs.setdefault("coverage_id", self.coverage_id)
+        kwargs.setdefault("version", self.version)
+        service = WCSService(self.base_url, **kwargs)
+
+        try:
+            service.describe_coverage(self.coverage_id)
+        except ValueError as exc:
+            raise ValueError(
+                f"Coverage '{self.coverage_id}' is not available from {self.base_url}"  # noqa: G004
+            ) from exc
+        except RequestException as exc:
+            raise ValueError(
+                f"Failed to validate coverage '{self.coverage_id}' against {self.base_url}"  # noqa: G004
+            ) from exc
+
+        return service
+
+    def service_kwargs(self) -> Dict[str, Any]:
+        kwargs = super().service_kwargs()
+        kwargs.setdefault("coverage_id", self.coverage_id)
+        kwargs.setdefault("version", self.version)
+        return kwargs
+
+    def tile_kwargs(self) -> Dict[str, Any]:
+        kwargs = super().tile_kwargs()
+        kwargs["coverage_id"] = self.coverage_id
+        return kwargs
+
+
